@@ -76,7 +76,7 @@ The integration build uses the local matching libraries:
 7. generic AVR/Uno smoke compile;
 8. pinned PS2 + Drive + Stepper integration compile.
 
-Hosted CI run `37286973809` completed with all compile/regression jobs PASS and exposed one packaging issue: Arduino Lint rule LD003 rejected the Uno smoke sketch under `tests/arduino/`. The smoke sketch was moved to `extras/compile-tests/`, and CI was tightened to run Arduino Lint with Library Manager checks enabled.
+Hosted CI run `37286973809` completed with all compile/regression jobs PASS and exposed one packaging issue: Arduino Lint rule LD003 rejected the Uno smoke sketch under `tests/arduino/`. The smoke sketch was moved to `extras/compile-tests/`, and CI was tightened to run Arduino Lint with `library-manager: submit`, the admission mode for a new library.
 
 ## Hardware gates still required
 

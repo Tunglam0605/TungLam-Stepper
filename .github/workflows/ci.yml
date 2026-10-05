@@ -32,7 +32,7 @@ jobs:
       - name: Arduino Lint
         uses: arduino/arduino-lint-action@v3
         with:
-          library-manager: true
+          library-manager: submit
           compliance: strict
           project-type: library
 
