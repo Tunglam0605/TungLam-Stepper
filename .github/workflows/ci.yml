@@ -32,7 +32,7 @@ jobs:
       - name: Arduino Lint
         uses: arduino/arduino-lint-action@v3
         with:
-          library-manager: false
+          library-manager: true
           compliance: strict
           project-type: library
 
@@ -85,7 +85,7 @@ jobs:
             --fqbn arduino:avr:uno \
             --warnings all \
             --library . \
-            tests/arduino/AVRGenericSmoke
+            extras/compile-tests/AVRGenericSmoke
 
   integration-three-libraries:
     runs-on: ubuntu-24.04

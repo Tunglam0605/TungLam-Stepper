@@ -75,12 +75,31 @@ integration = (
 check(integration.is_file(),
       "three-library integration is kept outside Arduino IDE menu")
 
-smoke = ROOT / "tests" / "arduino" / "AVRGenericSmoke" / "AVRGenericSmoke.ino"
+smoke = ROOT / "extras" / "compile-tests" / "AVRGenericSmoke" / "AVRGenericSmoke.ino"
 check(smoke.is_file(), "generic AVR compile smoke sketch exists")
 
 print("\n=== Repository hygiene ===")
 for generated in ["build", ".pio", ".vscode/.browse.c_cpp.db"]:
     check(not (ROOT / generated).exists(), f"no generated artifact: {generated}")
+
+check(not (ROOT / ".development").exists(),
+      "no .development marker")
+check(not (ROOT / ".gitmodules").exists(),
+      "no Git submodules")
+
+exe_files = [
+    str(path.relative_to(ROOT))
+    for path in ROOT.rglob("*")
+    if path.is_file() and path.suffix.lower() == ".exe" and ".git" not in path.parts
+]
+check(not exe_files, "no .exe files in repository")
+
+symlinks = [
+    str(path.relative_to(ROOT))
+    for path in ROOT.rglob("*")
+    if path.is_symlink() and ".git" not in path.parts
+]
+check(not symlinks, "no symlinks in repository")
 
 bad = []
 for path in ROOT.rglob("*"):

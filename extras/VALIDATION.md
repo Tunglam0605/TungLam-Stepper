@@ -71,12 +71,12 @@ The integration build uses the local matching libraries:
 2. motion/safety regression;
 3. API surface audit;
 4. package audit;
-5. Arduino Lint strict;
+5. Arduino Lint strict + Library Manager checks;
 6. all three Mega2560 main examples;
 7. generic AVR/Uno smoke compile;
 8. pinned PS2 + Drive + Stepper integration compile.
 
-Hosted CI has **not** run yet because the Stepper repository has not been published to GitHub.
+Hosted CI run `37286973809` completed with all compile/regression jobs PASS and exposed one packaging issue: Arduino Lint rule LD003 rejected the Uno smoke sketch under `tests/arduino/`. The smoke sketch was moved to `extras/compile-tests/`, and CI was tightened to run Arduino Lint with Library Manager checks enabled.
 
 ## Hardware gates still required
 
