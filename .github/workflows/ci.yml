@@ -14,8 +14,14 @@ jobs:
       - name: Architecture audit
         run: python3 tools/check_architecture.py
 
-      - name: Motion math regression
+      - name: Motion and safety regression
         run: python3 tests/test_motion_math.py
+
+      - name: API surface audit
+        run: python3 tools/check_api_surface.py
+
+      - name: Package audit
+        run: python3 tools/check_package.py
 
   arduino-lint:
     runs-on: ubuntu-24.04
@@ -44,13 +50,75 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install arduino:avr@1.8.8
 
-      - name: Compile every example for Arduino Mega 2560
+      - name: Compile every main example for Arduino Mega 2560
         shell: bash
         run: |
           set -euo pipefail
           for sketch in examples/*; do
             if [ -d "$sketch" ]; then
               echo "=== Compiling $sketch ==="
-              arduino-cli compile                 --fqbn arduino:avr:mega                 --library .                 "$sketch"
+              arduino-cli compile \
+                --fqbn arduino:avr:mega \
+                --warnings all \
+                --library . \
+                "$sketch"
             fi
           done
+
+  compile-generic-avr:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install AVR core
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install arduino:avr@1.8.8
+
+      - name: Compile generic AVR smoke test for Arduino Uno
+        run: |
+          arduino-cli compile \
+            --fqbn arduino:avr:uno \
+            --warnings all \
+            --library . \
+            tests/arduino/AVRGenericSmoke
+
+  integration-three-libraries:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Stepper library
+        uses: actions/checkout@v5
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install AVR core
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install arduino:avr@1.8.8
+
+      - name: Fetch pinned TungLam ecosystem dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v0.5.0 \
+            https://github.com/Tunglam0605/TungLam-PS2-Controller.git \
+            "$RUNNER_TEMP/TungLam_PS2"
+          git clone --depth 1 --branch v0.11.0 \
+            https://github.com/Tunglam0605/TungLam-OmniMecanum-4WD.git \
+            "$RUNNER_TEMP/TungLam_Drive"
+
+      - name: Compile PS2 + Drive + Stepper integration
+        shell: bash
+        run: |
+          arduino-cli compile \
+            --fqbn arduino:avr:mega \
+            --warnings all \
+            --library . \
+            --library "$RUNNER_TEMP/TungLam_PS2" \
+            --library "$RUNNER_TEMP/TungLam_Drive" \
+            extras/integration-examples/ThreeLibraryRobot

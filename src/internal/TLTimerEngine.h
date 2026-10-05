@@ -34,7 +34,15 @@ class TLTimerEngine {
   static volatile uint16_t scheduledDeltaTicks_;
   static volatile uint16_t scheduledStartCounter_;
 
+  static uint8_t savedTccr1a_;
+  static uint8_t savedTccr1b_;
+  static uint8_t savedTimsk1_;
+  static uint16_t savedTcnt1_;
+  static uint16_t savedOcr1a_;
+  static uint16_t savedOcr1b_;
+
   static bool claimTimer1();
+  static void releaseTimer1IfUnused();
   static void processRiseElapsedFromIsr(uint16_t elapsed);
   static void armNextRiseFromIsr();
   static void armNextFallFromIsr();

@@ -2,11 +2,13 @@
 
 ## Mục tiêu
 
-Pinout này được chốt để ba thư viện có thể cùng tồn tại trên một Arduino Mega2560 mà không tranh chấp tài nguyên chính:
+Pinout này được chốt để ba thư viện cùng tồn tại trên Arduino Mega2560 mà không tranh chấp tài nguyên chính:
 
-- `TungLam_PS2`
-- `TungLam_OmniMecanum_4WD`
-- `TungLam_Stepper`
+- TungLam_PS2
+- TungLam_OmniMecanum_4WD
+- TungLam_Stepper
+
+Đây là **baseline khuyến nghị**, không phải chân bắt buộc.
 
 ## Resource map
 
@@ -17,7 +19,8 @@ Pinout này được chốt để ba thư viện có thể cùng tồn tại tr�
 | TungLam_PS2 | Hardware SPI | D50..D53 |
 | Stepper enable | GPIO | D42..D45 |
 | Stepper limits | PORTK | A8..A15 |
-| Servo | ưu tiên Timer5 | pin signal tùy ứng dụng |
+| Optional MS pins | GPIO | ví dụ D46..D48 cho một driver |
+| Servo | ưu tiên Timer5 | signal tùy ứng dụng |
 | Aux PWM | Timer2 | D9, D10 |
 | I2C | TWI | D20, D21 |
 | Serial1 | UART | D18, D19 |
@@ -33,28 +36,42 @@ Pinout này được chốt để ba thư viện có thể cùng tồn tại tr�
 | 3 | D26 / PA4 | D27 / PA5 | D44 / PL5 | A12 / PK4 | A13 / PK5 |
 | 4 | D28 / PA6 | D29 / PA7 | D45 / PL4 | A14 / PK6 | A15 / PK7 |
 
-STEP/DIR cùng PORTA giúp layout shield gọn và cho phép tối ưu bit-mask sau này. Limit cùng PORTK giúp việc đọc trạng thái nhiều limit rất nhanh và cho phép nâng cấp sang PCINT nếu cần.
+STEP/DIR cùng PORTA giúp layout shield gọn. Limit cùng PORTK giúp routing đồng nhất và đọc register nhanh.
 
 ## Timer1 contract
 
-`TungLam_Stepper::begin()` chủ động lấy Timer1 khỏi cấu hình PWM mặc định của Arduino AVR core.
+Arduino AVR core mặc định cấu hình Timer1 ở phase-correct 8-bit PWM với prescaler 64.
 
-Vì vậy khi Stepper đã begin:
+TungLam_Stepper chỉ claim Timer1 khi timer vẫn đúng trạng thái mặc định này hoặc hoàn toàn unused. Nếu subsystem khác đã đổi Timer1 mode/interrupt/output, begin() trả false với Timer1Conflict.
 
-- không dùng `analogWrite()` trên các output Timer1 D11/D12;
-- không gọi legacy `TungLam_Control_MotorV5::Init_Timer1()`;
-- không dùng thư viện khác đã chiếm Timer1 interrupt;
-- Servo trên Mega nên giữ trong nhóm Timer5 trước, tránh mở rộng tới mức Servo library phải dùng thêm Timer1.
+Library lưu register trước khi claim và khôi phục khi axis Stepper cuối cùng gọi end().
+
+Trong thời gian Stepper sở hữu Timer1:
+
+- không gọi analogWrite() trên Timer1 outputs D11/D12;
+- không gọi legacy TungLam_Control_MotorV5::Init_Timer1();
+- không dùng thư viện khác cần Timer1 interrupt;
+- Servo trên Mega nên nằm trong Timer5 trước, tránh mở rộng tới Timer1.
+
+## Optional microstep pins
+
+Microstep pins không nằm trong baseline bắt buộc vì nhiều driver công nghiệp dùng DIP.
+
+Với A4988/DRV8825 có thể chọn GPIO còn trống, ví dụ cho một axis:
+
+```text
+MS1/MODE0 -> D46
+MS2/MODE1 -> D47
+MS3/MODE2 -> D48
+```
+
+Đây chỉ là ví dụ wiring; API cho phép pin khác.
 
 ## Pin flexibility
-
-D22..D29/D42..D45/A8..A15 là **baseline tối ưu**, không phải chân bắt buộc.
-
-Constructor vẫn nhận pin tùy ý:
 
 ```cpp
 TungLamStepper axis(stepPin, dirPin, enablePin);
 axis.attachLimits(minPin, maxPin);
 ```
 
-Trên AVR, library cache port register + bit mask một lần trong `begin()`; đường chạy STEP không dùng `digitalWrite()`.
+Trong begin()/attach, library cache port register và bit mask. Đường STEP ISR không dùng digitalWrite().

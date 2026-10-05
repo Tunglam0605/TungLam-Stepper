@@ -1,63 +1,114 @@
-# Tích hợp ba thư viện TungLam trên Mega2560
+# Tích hợp TungLam_PS2 + TungLam_OmniMecanum_4WD + TungLam_Stepper
 
-## Kiến trúc
+## Resource ownership
 
 ```text
 TungLam_PS2
-    │
-    ▼
-Application state / arbitration
-    ├─────────> TungLam_OmniMecanum_4WD
-    │                 └─ Timer3 + Timer4
-    │
-    └─────────> TungLam_Stepper
-                      └─ Timer1
+  Hardware SPI D50..D53
+
+TungLam_OmniMecanum_4WD
+  Timer3 + Timer4
+  PWM D5..D8
+  DIR D30..D37
+
+TungLam_Stepper
+  Timer1
+  recommended STEP/DIR D22..D29
 ```
 
-PS2 dùng Hardware SPI D50..D53 và không sở hữu timer của hai motion library.
+Ba thư viện không phụ thuộc lẫn nhau ở core. Application mới quyết định arbitration.
 
-## Pattern khuyến nghị
+## Pattern robot thực tế
+
+Template đầy đủ:
+
+```text
+extras/integration-examples/ThreeLibraryRobot/ThreeLibraryRobot.ino
+```
+
+Flow:
+
+```text
+loop()
+  ├─ ps2.update()
+  ├─ robot.update()
+  │
+  ├─ mất PS2?
+  │    ├─ robot.stop()
+  │    └─ lift.stop()     <- idempotent fail-safe
+  │
+  ├─ right stick rotate priority
+  ├─ left stick translation
+  │
+  └─ mechanism buttons
+       ├─ Triangle -> stepper home
+       ├─ R1       -> moveToTravel(+50 mm)
+       ├─ R2       -> moveToTravel(0 mm)
+       └─ Circle   -> emergencyStop
+```
+
+Stepper không cần run() trong loop.
+
+## Cấu hình cơ khí trước khi dùng mm
 
 ```cpp
-#include <TungLam_PS2.h>
-#include <TungLam_OmniMecanum_4WD.h>
-#include <TungLam_Stepper.h>
+lift.setMotorFullStepsPerRevolution(200);
+lift.setMicrosteps(16);
+lift.setGearRatio(1.0f);
+lift.setTravelPerOutputRevolution(8.0f);
+```
 
-TungLamPS2 ps2;
-TungLamDrive4WD robot;
-TungLamStepper lift(22, 23, 42);
+Sau homing:
 
-void setup() {
-  robot.begin(TungLamPwmMode::High7k8Hz);
-  ps2.begin(53);
+```cpp
+lift.setSoftLimits(
+    0,
+    lift.travelToSteps(300.0f)
+);
 
-  lift.begin();
-  lift.attachLimits(A8, A9);
-  lift.setMicrosteps(16);
-}
+lift.moveToTravel(50.0f);
+```
 
-void loop() {
-  ps2.update();
-  robot.update();
+## Homing
 
-  // Drive logic.
-  // Stepper không cần run(): Timer1 vẫn phát xung ở nền.
+Không nên bật soft-limit làm reference chính trước khi homing.
 
-  if (ps2.pressed(PS2Button::R1) && !lift.isRunning()) {
-    lift.moveTravel(50.0f);
-  }
+```cpp
+TungLamStepperHomingConfig home(
+    TungLamStepperDirection::Negative,
+    1500,
+    300,
+    100,
+    0,
+    3,
+    160000
+);
 
-  if (!ps2.connected()) {
-    robot.stop();
+lift.home(home);
+```
+
+maxPhaseSteps bảo vệ trường hợp switch đứt/hỏng.
+
+## Fail-safe khi mất PS2
+
+```cpp
+if (!ps2.connected()) {
+  robot.stop();
+
+  if (lift.isRunning()) {
     lift.stop();
   }
+  return;
 }
 ```
 
-## Quy tắc ownership
+stop() của Stepper là idempotent, nên application có thể đi qua nhánh fail-safe ở nhiều vòng loop mà không liên tục lập lại quãng dừng.
 
-Không gọi `TungLam_Control_MotorV5::Init_Timer1()` khi dùng `TungLam_Stepper`.
+Nếu cơ cấu phải cắt motion tức thời vì nguy cơ cơ khí, dùng emergencyStop() thay stop().
 
-Nếu dùng Servo trên Mega, giữ số lượng servo trong nhóm Timer5 trước. Không để Servo mở rộng sang Timer1.
+## Quy tắc tránh xung đột
 
-Các integration sketch không đặt trong `examples/` để `TungLam_Stepper` không biến PS2/Drive thành dependency bắt buộc.
+- Không gọi TungLam_Control_MotorV5::Init_Timer1() khi Stepper đang active.
+- Không dùng analogWrite() D11/D12 sau khi Stepper claim Timer1.
+- Giữ Servo trong Timer5 nếu có thể.
+- Không dùng PS2 BitBang wiring RoboBall cũ D22/D24/D26/D28 nếu đồng thời muốn dùng Stepper baseline D22..D29. Hãy dùng Hardware SPI PS2 D50..D53.

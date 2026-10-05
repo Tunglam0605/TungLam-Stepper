@@ -1,8 +1,8 @@
 /**
  * @file PositionTemplate.ino
- * @brief Template cơ bản: copy project rồi thay số bước/tốc độ theo cơ cấu thật.
+ * @brief Template single-axis: copy project rồi thay cấu hình theo cơ cấu thật.
  *
- * Baseline Mega2560 Axis 1:
+ * Mega2560 Axis 1 baseline:
  * STEP=D22, DIR=D23, EN=D42.
  */
 
@@ -10,28 +10,42 @@
 
 TungLamStepper axis(22, 23, 42);
 
-void setup() {
-  axis.begin();
+bool reportedDone = false;
 
-  // Motor 1.8°: 200 full-step/vòng.
+void setup() {
+  Serial.begin(115200);
+
+  if (!axis.begin()) {
+    Serial.print(F("Stepper begin failed: "));
+    Serial.println(TungLamStepper::faultName(axis.fault()));
+    return;
+  }
+
+  // Motor 1.8° = 200 full-step/vòng.
   axis.setMotorFullStepsPerRevolution(200);
 
-  // Driver đang đặt 1/16 microstep (bằng DIP/MS pin/UART tùy driver).
+  // TB6600/DM542 đặt vi bước bằng DIP thì chỉ cần khai báo hệ số.
   axis.setMicrosteps(16);
 
-  axis.setMaxSpeed(8000);      // pulse/s
-  axis.setAcceleration(12000); // pulse/s^2
-  axis.setDeceleration(12000); // pulse/s^2
+  axis.setMaxSpeed(8000);       // pulse/s
+  axis.setAcceleration(12000);  // pulse/s^2
+  axis.setDeceleration(12000);  // pulse/s^2
 
-  // 1 vòng đầu ra.
+  Serial.print(F("Timing ceiling [pulse/s]: "));
+  Serial.println(axis.maximumStepRate());
+
+  // Chạy tương đối +1 vòng đầu ra.
   axis.moveRevolutions(1.0f);
 }
 
 void loop() {
-  // Không cần run() và không cần delay để tạo xung STEP.
-  // Timer1 tiếp tục chạy motor ở nền.
+  // Không cần axis.run().
+  // Timer1 tiếp tục phát STEP trong nền.
 
-  if (!axis.isRunning()) {
-    // TODO: đặt state machine / PS2 / sensor / robot logic ở đây.
+  if (!axis.isRunning() && !reportedDone) {
+    axis.printState(Serial);
+    reportedDone = true;
+
+    // TODO: chuyển sang state tiếp theo của project tại đây.
   }
 }

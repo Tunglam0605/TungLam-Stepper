@@ -54,6 +54,8 @@ TungLamStepper::TungLamStepper(uint8_t stepPin,
     : stepPinNumber_(stepPin),
       dirPinNumber_(dirPin),
       enablePinNumber_(enablePin),
+      pulseWidthTicks_(0),
+      directionSetupTicks_(0),
       begun_(false),
       enabled_(false),
       autoEnable_(true),
@@ -61,6 +63,7 @@ TungLamStepper::TungLamStepper(uint8_t stepPin,
       mode_(TungLamStepperMode::Idle),
       fault_(TungLamStepperFault::None),
       running_(false),
+      stopping_(false),
       pulseHigh_(false),
       pulseFallAt_(0),
       ticksToStep_(0),
@@ -91,6 +94,8 @@ TungLamStepper::TungLamStepper(uint8_t stepPin,
       homingConfirmSamples_(3),
       homingActiveSamples_(0),
       homingInactiveSamples_(0),
+      homingMaxPhaseSteps_(0),
+      homingPhaseSteps_(0),
       limitsAttached_(false),
       limitsActiveLow_(true),
       softLimitsEnabled_(false),
@@ -102,8 +107,7 @@ TungLamStepper::TungLamStepper(uint8_t stepPin,
       travelPerOutputRevolution_(0.0f) {}
 
 TungLamStepper::~TungLamStepper() {
-  emergencyStop();
-  TLTimerEngine::unregisterAxis(this);
+  end(true);
 }
 
 bool TungLamStepper::begin() {
@@ -114,7 +118,8 @@ bool TungLamStepper::begin(const TungLamStepperDriverConfig& driver,
                            const TungLamStepperMotionConfig& motion) {
   if (begun_) return true;
 
-  if (!validateDriverConfig(driver) || !validateMotionConfig(motion)) {
+  if (!validateDriverConfig(driver) || !validateMotionConfig(motion) ||
+      motion.maxSpeedStepsPerSecond > maximumStepRateForDriver(driver)) {
     fault_ = TungLamStepperFault::InvalidConfig;
     return false;
   }
@@ -132,8 +137,9 @@ bool TungLamStepper::begin(const TungLamStepperDriverConfig& driver,
 
   driverConfig_ = driver;
   motionConfig_ = motion;
+  rebuildDriverTimingCache();
 
-  step_.low();
+  step_.write(!driverConfig_.stepActiveHigh);
   dir_.low();
 
   if (enable_.valid()) {
@@ -155,6 +161,21 @@ bool TungLamStepper::begin(const TungLamStepperDriverConfig& driver,
   begun_ = true;
   fault_ = TungLamStepperFault::None;
   return true;
+}
+
+void TungLamStepper::end(bool disableDriver) {
+  if (!begun_) return;
+
+  emergencyStop();
+
+  if (disableDriver && enable_.valid()) {
+    enable_.write(driverConfig_.enableActiveLow);
+    enabled_ = false;
+  }
+
+  TLTimerEngine::unregisterAxis(this);
+  slot_ = NO_PIN;
+  begun_ = false;
 }
 
 void TungLamStepper::enable() {
@@ -186,9 +207,18 @@ bool TungLamStepper::autoEnable() const {
 
 bool TungLamStepper::setDriverConfig(
     const TungLamStepperDriverConfig& config) {
-  if (!validateDriverConfig(config) || running_) return false;
+  if (!validateDriverConfig(config) || running_ ||
+      motionConfig_.maxSpeedStepsPerSecond >
+          maximumStepRateForDriver(config)) {
+    return false;
+  }
 
   driverConfig_ = config;
+  rebuildDriverTimingCache();
+
+  if (step_.valid()) {
+    step_.write(!driverConfig_.stepActiveHigh);
+  }
 
   if (enable_.valid()) {
     enable_.write(enabled_ ? !driverConfig_.enableActiveLow
@@ -203,7 +233,10 @@ const TungLamStepperDriverConfig& TungLamStepper::driverConfig() const {
 
 bool TungLamStepper::setMotionConfig(
     const TungLamStepperMotionConfig& config) {
-  if (!validateMotionConfig(config) || running_) return false;
+  if (!validateMotionConfig(config) || running_ ||
+      config.maxSpeedStepsPerSecond > maximumStepRate()) {
+    return false;
+  }
   motionConfig_ = config;
   return true;
 }
@@ -231,13 +264,19 @@ bool TungLamStepper::setDeceleration(uint32_t stepsPerSecond2) {
 }
 
 bool TungLamStepper::setMotorFullStepsPerRevolution(uint16_t fullSteps) {
-  if (fullSteps == 0) return false;
+  if (fullSteps == 0 || running_) {
+    fault_ = TungLamStepperFault::InvalidConfig;
+    return false;
+  }
   fullStepsPerRevolution_ = fullSteps;
   return true;
 }
 
 bool TungLamStepper::setMicrosteps(uint16_t microsteps) {
-  if (microsteps == 0 || microsteps > 1024 || running_) return false;
+  if (microsteps == 0 || microsteps > 1024 || running_) {
+    fault_ = TungLamStepperFault::InvalidConfig;
+    return false;
+  }
   microsteps_ = microsteps;
   return true;
 }
@@ -310,13 +349,19 @@ bool TungLamStepper::setMicrostepMode(
 }
 
 bool TungLamStepper::setGearRatio(float motorRevolutionsPerOutputRevolution) {
-  if (!(motorRevolutionsPerOutputRevolution > 0.0f)) return false;
+  if (running_ || !(motorRevolutionsPerOutputRevolution > 0.0f)) {
+    fault_ = TungLamStepperFault::InvalidConfig;
+    return false;
+  }
   gearRatio_ = motorRevolutionsPerOutputRevolution;
   return true;
 }
 
 bool TungLamStepper::setTravelPerOutputRevolution(float travelUnits) {
-  if (!(travelUnits > 0.0f)) return false;
+  if (running_ || !(travelUnits > 0.0f)) {
+    fault_ = TungLamStepperFault::InvalidConfig;
+    return false;
+  }
   travelPerOutputRevolution_ = travelUnits;
   return true;
 }
@@ -348,7 +393,7 @@ bool TungLamStepper::move(int32_t relativeSteps) {
   const int64_t target =
       static_cast<int64_t>(position()) + static_cast<int64_t>(relativeSteps);
   if (target < -2147483648LL || target > 2147483647LL) {
-    fault_ = TungLamStepperFault::InvalidConfig;
+    fault_ = TungLamStepperFault::PositionOverflow;
     return false;
   }
 
@@ -368,13 +413,13 @@ bool TungLamStepper::moveTo(int32_t absolutePositionSteps) {
 }
 
 bool TungLamStepper::moveRevolutions(float outputRevolutions) {
+  int32_t steps = 0;
   const float pulses = outputRevolutions * pulsesPerOutputRevolution();
-  if (!isfinite(pulses) || pulses < -2147483648.0f ||
-      pulses > 2147483520.0f) {
-    fault_ = TungLamStepperFault::InvalidConfig;
+  if (!roundedFloatToInt32(pulses, &steps)) {
+    fault_ = TungLamStepperFault::PositionOverflow;
     return false;
   }
-  return move(static_cast<int32_t>(lroundf(pulses)));
+  return move(steps);
 }
 
 bool TungLamStepper::moveDegrees(float outputDegrees) {
@@ -387,13 +432,71 @@ bool TungLamStepper::moveTravel(float travelUnits) {
     return false;
   }
 
-  const float revolutions = travelUnits / travelPerOutputRevolution_;
-  return moveRevolutions(revolutions);
+  return moveRevolutions(travelUnits / travelPerOutputRevolution_);
+}
+
+bool TungLamStepper::moveToRevolutions(float outputRevolutions) {
+  int32_t steps = 0;
+  const float pulses = outputRevolutions * pulsesPerOutputRevolution();
+  if (!roundedFloatToInt32(pulses, &steps)) {
+    fault_ = TungLamStepperFault::PositionOverflow;
+    return false;
+  }
+  return moveTo(steps);
+}
+
+bool TungLamStepper::moveToDegrees(float outputDegrees) {
+  return moveToRevolutions(outputDegrees / 360.0f);
+}
+
+bool TungLamStepper::moveToTravel(float travelUnits) {
+  if (!(travelPerOutputRevolution_ > 0.0f)) {
+    fault_ = TungLamStepperFault::InvalidConfig;
+    return false;
+  }
+  return moveToRevolutions(travelUnits / travelPerOutputRevolution_);
+}
+
+int32_t TungLamStepper::revolutionsToSteps(float outputRevolutions) const {
+  int32_t result = 0;
+  const float pulses = outputRevolutions * pulsesPerOutputRevolution();
+  if (roundedFloatToInt32(pulses, &result)) return result;
+  if (!isfinite(pulses)) return 0;
+  return pulses < 0.0f ? INT32_MIN : INT32_MAX;
+}
+
+int32_t TungLamStepper::degreesToSteps(float outputDegrees) const {
+  return revolutionsToSteps(outputDegrees / 360.0f);
+}
+
+int32_t TungLamStepper::travelToSteps(float travelUnits) const {
+  if (!(travelPerOutputRevolution_ > 0.0f)) return 0;
+  return revolutionsToSteps(travelUnits / travelPerOutputRevolution_);
+}
+
+float TungLamStepper::stepsToRevolutions(int32_t steps) const {
+  const float ppr = pulsesPerOutputRevolution();
+  return ppr > 0.0f ? static_cast<float>(steps) / ppr : 0.0f;
+}
+
+float TungLamStepper::stepsToDegrees(int32_t steps) const {
+  return stepsToRevolutions(steps) * 360.0f;
+}
+
+float TungLamStepper::stepsToTravel(int32_t steps) const {
+  if (!(travelPerOutputRevolution_ > 0.0f)) return 0.0f;
+  return stepsToRevolutions(steps) * travelPerOutputRevolution_;
 }
 
 bool TungLamStepper::runContinuous(TungLamStepperDirection direction,
                                    uint32_t stepsPerSecond) {
   if (!begun_ || stepsPerSecond == 0 || running_) return false;
+
+  if (stepsPerSecond > motionConfig_.maxSpeedStepsPerSecond ||
+      stepsPerSecond > maximumStepRate()) {
+    fault_ = TungLamStepperFault::InvalidConfig;
+    return false;
+  }
 
   TLTimerEngine::synchronizeNow();
 
@@ -410,6 +513,7 @@ bool TungLamStepper::runContinuous(TungLamStepperDirection direction,
     AtomicGuard lock;
     mode_ = TungLamStepperMode::Continuous;
     running_ = true;
+    stopping_ = false;
     directionSign_ = sign;
     totalSteps_ = 0;
     completedSteps_ = 0;
@@ -419,8 +523,7 @@ bool TungLamStepper::runContinuous(TungLamStepperDirection direction,
     minIntervalQ8_ = currentIntervalQ8_;
     ticksToStep_ = tlMaxU32(
         interval,
-        static_cast<uint32_t>(driverConfig_.directionSetupUs) *
-            (TLTimerEngine::timerHz() / 1000000UL));
+        directionSetupTicks_);
   }
 
   if (autoEnable_) enable();
@@ -438,6 +541,8 @@ bool TungLamStepper::home(const TungLamStepperHomingConfig& config) {
   if (config.fastSpeedStepsPerSecond == 0 ||
       config.slowSpeedStepsPerSecond == 0 ||
       config.slowSpeedStepsPerSecond > config.fastSpeedStepsPerSecond ||
+      config.fastSpeedStepsPerSecond > motionConfig_.maxSpeedStepsPerSecond ||
+      config.fastSpeedStepsPerSecond > maximumStepRate() ||
       config.confirmSamples == 0) {
     fault_ = TungLamStepperFault::InvalidConfig;
     return false;
@@ -472,11 +577,14 @@ bool TungLamStepper::home(const TungLamStepperHomingConfig& config) {
   homingConfirmSamples_ = config.confirmSamples;
   homingActiveSamples_ = 0;
   homingInactiveSamples_ = 0;
+  homingMaxPhaseSteps_ = config.maxPhaseSteps;
+  homingPhaseSteps_ = 0;
   homed_ = false;
   fault_ = TungLamStepperFault::None;
 
   mode_ = TungLamStepperMode::Homing;
   running_ = true;
+  stopping_ = false;
   completedSteps_ = 0;
   totalSteps_ = 0;
 
@@ -495,8 +603,7 @@ bool TungLamStepper::home(const TungLamStepperHomingConfig& config) {
   minIntervalQ8_ = currentIntervalQ8_;
 
   const uint32_t setupTicks =
-      static_cast<uint32_t>(driverConfig_.directionSetupUs) *
-      tlMaxU32(1, TLTimerEngine::timerHz() / 1000000UL);
+      directionSetupTicks_;
   ticksToStep_ = tlMaxU32(currentIntervalTicks_, setupTicks);
 
   if (autoEnable_) enable();
@@ -521,7 +628,7 @@ void TungLamStepper::clearHomed() {
 }
 
 void TungLamStepper::stop() {
-  if (!running_) return;
+  if (!running_ || stopping_) return;
 
   if (mode_ == TungLamStepperMode::Homing) {
     emergencyStop();
@@ -534,12 +641,15 @@ void TungLamStepper::stop() {
 }
 
 void TungLamStepper::emergencyStop() {
-  TLTimerEngine::synchronizeNow();
+  bool wasHoming = false;
 
+  // Hide this axis from any pending compare before synchronizing the other
+  // axes. This prevents one final STEP after the stop request.
   {
     AtomicGuard lock;
-    const bool wasHoming = (mode_ == TungLamStepperMode::Homing);
+    wasHoming = (mode_ == TungLamStepperMode::Homing);
     running_ = false;
+    stopping_ = false;
     mode_ = TungLamStepperMode::Idle;
     ticksToStep_ = 0;
 
@@ -548,10 +658,15 @@ void TungLamStepper::emergencyStop() {
       homed_ = false;
       homingActiveSamples_ = 0;
       homingInactiveSamples_ = 0;
+      homingPhaseSteps_ = 0;
     }
   }
 
-  if (pulseHigh_) step_.low();
+  TLTimerEngine::synchronizeNow();
+
+  if (pulseHigh_) {
+    step_.write(!driverConfig_.stepActiveHigh);
+  }
   pulseHigh_ = false;
   TLTimerEngine::notifyScheduleChanged();
 }
@@ -562,6 +677,10 @@ bool TungLamStepper::isRunning() const {
 
 bool TungLamStepper::isMovingToPosition() const {
   return running_ && mode_ == TungLamStepperMode::Position;
+}
+
+bool TungLamStepper::isStopping() const {
+  return stopping_;
 }
 
 TungLamStepperMode TungLamStepper::mode() const {
@@ -587,21 +706,24 @@ void TungLamStepper::setCurrentPosition(int32_t positionSteps) {
 
 int32_t TungLamStepper::distanceToGo() const {
   AtomicGuard lock;
-  return targetPosition_ - currentPosition_;
+  const int64_t distance =
+      static_cast<int64_t>(targetPosition_) -
+      static_cast<int64_t>(currentPosition_);
+  if (distance < -2147483648LL) return INT32_MIN;
+  if (distance > 2147483647LL) return INT32_MAX;
+  return static_cast<int32_t>(distance);
 }
 
 float TungLamStepper::positionRevolutions() const {
-  const float ppr = pulsesPerOutputRevolution();
-  return ppr > 0.0f ? static_cast<float>(position()) / ppr : 0.0f;
+  return stepsToRevolutions(position());
 }
 
 float TungLamStepper::positionDegrees() const {
-  return positionRevolutions() * 360.0f;
+  return stepsToDegrees(position());
 }
 
 float TungLamStepper::positionTravel() const {
-  if (!(travelPerOutputRevolution_ > 0.0f)) return 0.0f;
-  return positionRevolutions() * travelPerOutputRevolution_;
+  return stepsToTravel(position());
 }
 
 bool TungLamStepper::attachLimits(uint8_t minPin,
@@ -610,19 +732,25 @@ bool TungLamStepper::attachLimits(uint8_t minPin,
                                   bool usePullups) {
   if (running_) return false;
 
-  const uint8_t mode = usePullups ? INPUT_PULLUP : INPUT;
-  bool ok = true;
+  const uint8_t pinMode = usePullups ? INPUT_PULLUP : INPUT;
+  tunglam::stepper::internal::TLFastPin newMin;
+  tunglam::stepper::internal::TLFastPin newMax;
 
-  if (minPin != NO_PIN) ok &= limitMin_.attach(minPin, mode);
-  if (maxPin != NO_PIN) ok &= limitMax_.attach(maxPin, mode);
-
-  if (!ok) {
+  if (minPin != NO_PIN && !newMin.attach(minPin, pinMode)) {
     fault_ = TungLamStepperFault::InvalidPin;
     return false;
   }
 
+  if (maxPin != NO_PIN && !newMax.attach(maxPin, pinMode)) {
+    fault_ = TungLamStepperFault::InvalidPin;
+    return false;
+  }
+
+  limitMin_ = newMin;
+  limitMax_ = newMax;
   limitsAttached_ = (minPin != NO_PIN || maxPin != NO_PIN);
   limitsActiveLow_ = activeLow;
+  fault_ = TungLamStepperFault::None;
   return true;
 }
 
@@ -648,12 +776,14 @@ void TungLamStepper::setSoftLimits(int32_t minPosition, int32_t maxPosition) {
     maxPosition = temp;
   }
 
+  AtomicGuard lock;
   softMin_ = minPosition;
   softMax_ = maxPosition;
   softLimitsEnabled_ = true;
 }
 
 void TungLamStepper::clearSoftLimits() {
+  AtomicGuard lock;
   softLimitsEnabled_ = false;
 }
 
@@ -669,10 +799,103 @@ void TungLamStepper::clearFault() {
   if (!running_) fault_ = TungLamStepperFault::None;
 }
 
+const __FlashStringHelper* TungLamStepper::faultName(
+    TungLamStepperFault fault) {
+  switch (fault) {
+    case TungLamStepperFault::None:             return F("None");
+    case TungLamStepperFault::InvalidPin:       return F("InvalidPin");
+    case TungLamStepperFault::NoAxisSlot:       return F("NoAxisSlot");
+    case TungLamStepperFault::Timer1Conflict:   return F("Timer1Conflict");
+    case TungLamStepperFault::InvalidConfig:    return F("InvalidConfig");
+    case TungLamStepperFault::SoftLimit:        return F("SoftLimit");
+    case TungLamStepperFault::MinLimit:         return F("MinLimit");
+    case TungLamStepperFault::MaxLimit:         return F("MaxLimit");
+    case TungLamStepperFault::PositionOverflow:
+      return F("PositionOverflow");
+    case TungLamStepperFault::HomingTravelExceeded:
+      return F("HomingTravelExceeded");
+  }
+  return F("Unknown");
+}
+
+const __FlashStringHelper* TungLamStepper::modeName(TungLamStepperMode mode) {
+  switch (mode) {
+    case TungLamStepperMode::Idle:       return F("Idle");
+    case TungLamStepperMode::Position:   return F("Position");
+    case TungLamStepperMode::Continuous: return F("Continuous");
+    case TungLamStepperMode::Homing:     return F("Homing");
+  }
+  return F("Unknown");
+}
+
+const __FlashStringHelper* TungLamStepper::homingStateName(
+    TungLamStepperHomingState state) {
+  switch (state) {
+    case TungLamStepperHomingState::Idle:     return F("Idle");
+    case TungLamStepperHomingState::SeekFast: return F("SeekFast");
+    case TungLamStepperHomingState::Backoff:  return F("Backoff");
+    case TungLamStepperHomingState::SeekSlow: return F("SeekSlow");
+    case TungLamStepperHomingState::Complete: return F("Complete");
+  }
+  return F("Unknown");
+}
+
+void TungLamStepper::printState(Print& out) const {
+  int32_t pos;
+  int32_t target;
+  uint32_t interval;
+  bool running;
+  bool stopping;
+  bool enabled;
+  bool homed;
+  TungLamStepperMode mode;
+  TungLamStepperFault fault;
+  TungLamStepperHomingState homeState;
+
+  {
+    AtomicGuard lock;
+    pos = currentPosition_;
+    target = targetPosition_;
+    interval = currentIntervalTicks_;
+    running = running_;
+    stopping = stopping_;
+    enabled = enabled_;
+    homed = homed_;
+    mode = mode_;
+    fault = fault_;
+    homeState = homingState_;
+  }
+
+  out.print(F("mode="));
+  out.print(modeName(mode));
+  out.print(F(" running="));
+  out.print(running ? F("1") : F("0"));
+  out.print(F(" stopping="));
+  out.print(stopping ? F("1") : F("0"));
+  out.print(F(" enabled="));
+  out.print(enabled ? F("1") : F("0"));
+  out.print(F(" pos="));
+  out.print(pos);
+  out.print(F(" target="));
+  out.print(target);
+  out.print(F(" interval_ticks="));
+  out.print(interval);
+  out.print(F(" fault="));
+  out.print(faultName(fault));
+  out.print(F(" homed="));
+  out.print(homed ? F("1") : F("0"));
+  out.print(F(" home_state="));
+  out.println(homingStateName(homeState));
+}
+
 uint8_t TungLamStepper::stepPin() const { return stepPinNumber_; }
 uint8_t TungLamStepper::dirPin() const { return dirPinNumber_; }
 uint8_t TungLamStepper::enablePin() const { return enablePinNumber_; }
 uint8_t TungLamStepper::engineSlot() const { return slot_; }
+
+uint32_t TungLamStepper::maximumStepRate() const {
+  return maximumStepRateForDriver(driverConfig_);
+}
 
 uint8_t TungLamStepper::maxAxes() {
   return TLTimerEngine::kMaxAxes;
@@ -733,8 +956,17 @@ bool TungLamStepper::planPositionMove(int32_t target) {
       static_cast<int64_t>(target) - static_cast<int64_t>(current);
   if (delta64 == 0) return true;
 
-  const uint32_t steps =
-      static_cast<uint32_t>(delta64 > 0 ? delta64 : -delta64);
+  const uint64_t magnitude =
+      static_cast<uint64_t>(delta64 > 0 ? delta64 : -delta64);
+
+  // Recurrence phase indices are signed 32-bit. Larger travel can be split
+  // into multiple commands without sacrificing the full int32 position range.
+  if (magnitude > static_cast<uint64_t>(INT32_MAX)) {
+    fault_ = TungLamStepperFault::PositionOverflow;
+    return false;
+  }
+
+  const uint32_t steps = static_cast<uint32_t>(magnitude);
   const int8_t sign = delta64 > 0 ? 1 : -1;
 
   if (!prepareDirection(sign)) return false;
@@ -747,14 +979,24 @@ bool TungLamStepper::planPositionMove(int32_t target) {
       static_cast<float>(motionConfig_.decelerationStepsPerSecond2);
 
   float peak2 = vmax * vmax;
-  uint32_t accelSteps =
-      static_cast<uint32_t>(peak2 / (2.0f * accel));
-  uint32_t decelSteps =
-      static_cast<uint32_t>(peak2 / (2.0f * decel));
+
+  const uint64_t vmaxInt = motionConfig_.maxSpeedStepsPerSecond;
+  const uint64_t vmax2 = vmaxInt * vmaxInt;
+  const uint64_t accelDistance64 =
+      vmax2 / (2ULL * motionConfig_.accelerationStepsPerSecond2);
+  const uint64_t decelDistance64 =
+      vmax2 / (2ULL * motionConfig_.decelerationStepsPerSecond2);
+
+  uint32_t accelSteps = accelDistance64 > UINT32_MAX
+                            ? UINT32_MAX
+                            : static_cast<uint32_t>(accelDistance64);
+  uint32_t decelSteps = decelDistance64 > UINT32_MAX
+                            ? UINT32_MAX
+                            : static_cast<uint32_t>(decelDistance64);
 
   float peakSpeed = vmax;
 
-  if (static_cast<uint64_t>(accelSteps) + decelSteps > steps) {
+  if (accelDistance64 + decelDistance64 > steps) {
     peak2 = (2.0f * static_cast<float>(steps) * accel * decel) /
             (accel + decel);
     peakSpeed = sqrtf(peak2);
@@ -780,6 +1022,7 @@ bool TungLamStepper::planPositionMove(int32_t target) {
     targetPosition_ = target;
     mode_ = TungLamStepperMode::Position;
     running_ = true;
+    stopping_ = false;
     directionSign_ = sign;
 
     totalSteps_ = steps;
@@ -797,7 +1040,10 @@ bool TungLamStepper::planPositionMove(int32_t target) {
     c0Q8_ = ticksToQ8(c0);
     currentIntervalQ8_ = c0Q8_;
     currentIntervalTicks_ = q8ToTicks(currentIntervalQ8_);
-    ticksToStep_ = currentIntervalTicks_;
+
+    const uint32_t setupTicks =
+        directionSetupTicks_;
+    ticksToStep_ = tlMaxU32(currentIntervalTicks_, setupTicks);
   }
 
   if (autoEnable_) enable();
@@ -808,9 +1054,26 @@ bool TungLamStepper::planPositionMove(int32_t target) {
 
 bool TungLamStepper::validateMotionConfig(
     const TungLamStepperMotionConfig& config) const {
-  return config.maxSpeedStepsPerSecond > 0 &&
-         config.accelerationStepsPerSecond2 > 0 &&
-         config.decelerationStepsPerSecond2 > 0;
+  if (config.maxSpeedStepsPerSecond == 0 ||
+      config.accelerationStepsPerSecond2 == 0 ||
+      config.decelerationStepsPerSecond2 == 0) {
+    return false;
+  }
+
+  const uint64_t v = config.maxSpeedStepsPerSecond;
+  const uint64_t v2 = v * v;
+  const uint64_t accelDen =
+      2ULL * config.accelerationStepsPerSecond2;
+  const uint64_t decelDen =
+      2ULL * config.decelerationStepsPerSecond2;
+
+  const uint64_t accelDistance =
+      (v2 + accelDen - 1ULL) / accelDen;
+  const uint64_t decelDistance =
+      (v2 + decelDen - 1ULL) / decelDen;
+
+  return accelDistance <= static_cast<uint64_t>(INT32_MAX) &&
+         decelDistance <= static_cast<uint64_t>(INT32_MAX);
 }
 
 bool TungLamStepper::validateDriverConfig(
@@ -819,11 +1082,28 @@ bool TungLamStepper::validateDriverConfig(
          config.directionSetupUs <= 1000;
 }
 
+void TungLamStepper::rebuildDriverTimingCache() {
+  const uint32_t pulse = microsecondsToTimerTicks(driverConfig_.pulseWidthUs);
+  const uint32_t direction =
+      microsecondsToTimerTicks(driverConfig_.directionSetupUs);
+
+  pulseWidthTicks_ =
+      static_cast<uint16_t>(pulse > 0xFFFFUL ? 0xFFFFUL : pulse);
+  directionSetupTicks_ =
+      static_cast<uint16_t>(direction > 0xFFFFUL ? 0xFFFFUL : direction);
+}
+
 uint32_t TungLamStepper::intervalTicksForSpeed(
     uint32_t stepsPerSecond) const {
   if (stepsPerSecond == 0) return 0xFFFFFFFFUL;
   const uint32_t hz = TLTimerEngine::timerHz();
-  return tlMaxU32(1, hz / stepsPerSecond);
+
+  // Ceil division guarantees the actual STEP rate never exceeds the request.
+  return tlMaxU32(
+      1,
+      static_cast<uint32_t>(
+          (static_cast<uint64_t>(hz) + stepsPerSecond - 1ULL) /
+          stepsPerSecond));
 }
 
 uint32_t TungLamStepper::initialIntervalTicks(uint32_t acceleration) const {
@@ -838,12 +1118,29 @@ uint32_t TungLamStepper::initialIntervalTicks(uint32_t acceleration) const {
   return static_cast<uint32_t>(c0);
 }
 
+uint32_t TungLamStepper::microsecondsToTimerTicks(
+    uint16_t microseconds) const {
+  if (microseconds == 0) return 0;
+
+  const uint64_t scaled =
+      static_cast<uint64_t>(microseconds) * TLTimerEngine::timerHz();
+  return static_cast<uint32_t>((scaled + 999999ULL) / 1000000ULL);
+}
+
 uint32_t TungLamStepper::minimumLegalIntervalTicks() const {
-  const uint32_t ticksPerUs =
-      tlMaxU32(1, TLTimerEngine::timerHz() / 1000000UL);
+  return static_cast<uint32_t>(pulseWidthTicks_) +
+         TLTimerEngine::kMinCompareGuardTicks;
+}
+
+uint32_t TungLamStepper::maximumStepRateForDriver(
+    const TungLamStepperDriverConfig& config) const {
+  const uint64_t scaled =
+      static_cast<uint64_t>(config.pulseWidthUs) * TLTimerEngine::timerHz();
   const uint32_t pulseTicks =
-      static_cast<uint32_t>(driverConfig_.pulseWidthUs) * ticksPerUs;
-  return pulseTicks + TLTimerEngine::kMinCompareGuardTicks;
+      static_cast<uint32_t>((scaled + 999999ULL) / 1000000ULL);
+  const uint32_t interval =
+      pulseTicks + TLTimerEngine::kMinCompareGuardTicks;
+  return interval > 0 ? TLTimerEngine::timerHz() / interval : 0;
 }
 
 uint32_t TungLamStepper::ticksToQ8(uint32_t ticks) {
@@ -873,8 +1170,26 @@ bool TungLamStepper::homeLimitActiveFromIsr() const {
 
 bool TungLamStepper::nextStepViolatesSoftLimitFromIsr() const {
   if (!softLimitsEnabled_) return false;
-  const int32_t next = currentPosition_ + directionSign_;
-  return next < softMin_ || next > softMax_;
+
+  const int64_t current = currentPosition_;
+  const int64_t next = current + directionSign_;
+
+  if (next < softMin_) {
+    // Nếu đang ở dưới MIN, vẫn cho phép chạy theo chiều dương để recovery.
+    return !(current < softMin_ && directionSign_ > 0);
+  }
+
+  if (next > softMax_) {
+    // Nếu đang ở trên MAX, vẫn cho phép chạy theo chiều âm để recovery.
+    return !(current > softMax_ && directionSign_ < 0);
+  }
+
+  return false;
+}
+
+bool TungLamStepper::nextStepOverflowsPositionFromIsr() const {
+  return (directionSign_ > 0 && currentPosition_ == INT32_MAX) ||
+         (directionSign_ < 0 && currentPosition_ == INT32_MIN);
 }
 
 void TungLamStepper::stepRiseFromIsr() {
@@ -891,22 +1206,31 @@ void TungLamStepper::stepRiseFromIsr() {
     return;
   }
 
-  if (nextStepViolatesSoftLimitFromIsr()) {
+  if (nextStepOverflowsPositionFromIsr()) {
+    hardStopFromIsr(TungLamStepperFault::PositionOverflow);
+    return;
+  }
+
+  if (mode_ != TungLamStepperMode::Homing &&
+      nextStepViolatesSoftLimitFromIsr()) {
     hardStopFromIsr(TungLamStepperFault::SoftLimit);
     return;
   }
 
-  step_.high();
+  step_.write(driverConfig_.stepActiveHigh);
   pulseHigh_ = true;
 
-  const uint32_t ticksPerUs =
-      tlMaxU32(1, TLTimerEngine::timerHz() / 1000000UL);
-  pulseFallAt_ = static_cast<uint16_t>(
-      TCNT1 + static_cast<uint16_t>(
-                  driverConfig_.pulseWidthUs * ticksPerUs));
+  pulseFallAt_ =
+      static_cast<uint16_t>(TCNT1 + pulseWidthTicks_);
 
   currentPosition_ += directionSign_;
-  ++completedSteps_;
+  if (mode_ != TungLamStepperMode::Continuous) {
+    ++completedSteps_;
+  }
+
+  if (mode_ == TungLamStepperMode::Homing) {
+    ++homingPhaseSteps_;
+  }
 
   if (mode_ == TungLamStepperMode::Homing &&
       homingState_ == TungLamStepperHomingState::Backoff) {
@@ -934,7 +1258,7 @@ void TungLamStepper::stepRiseFromIsr() {
 }
 
 void TungLamStepper::stepFallFromIsr() {
-  step_.low();
+  step_.write(!driverConfig_.stepActiveHigh);
   pulseHigh_ = false;
 }
 
@@ -943,19 +1267,36 @@ bool TungLamStepper::handleHomingBeforeStepFromIsr() {
       homingState_ == TungLamStepperHomingState::SeekSlow) {
     if (homeLimitActiveFromIsr()) {
       if (homingActiveSamples_ < 255) ++homingActiveSamples_;
-    } else {
-      homingActiveSamples_ = 0;
-    }
 
-    if (homingActiveSamples_ >= homingConfirmSamples_) {
-      homingActiveSamples_ = 0;
-      if (homingState_ == TungLamStepperHomingState::SeekFast) {
-        transitionHomingToBackoffFromIsr();
+      if (homingActiveSamples_ >= homingConfirmSamples_) {
+        homingActiveSamples_ = 0;
+        if (homingState_ == TungLamStepperHomingState::SeekFast) {
+          transitionHomingToBackoffFromIsr();
+        } else {
+          finishHomingFromIsr();
+        }
       } else {
-        finishHomingFromIsr();
+        // Confirm switch state on later timer events without pushing deeper
+        // into the mechanical stop during debounce.
+        ticksToStep_ = currentIntervalTicks_;
       }
       return true;
     }
+
+    homingActiveSamples_ = 0;
+
+    // The last permitted physical STEP may have just activated the switch.
+    // Only fail once the next event confirms the switch is still inactive.
+    if (homingPhaseLimitExceededFromIsr()) {
+      hardStopFromIsr(TungLamStepperFault::HomingTravelExceeded);
+      return true;
+    }
+  }
+
+  if (homingState_ == TungLamStepperHomingState::Backoff &&
+      homingPhaseLimitExceededFromIsr()) {
+    hardStopFromIsr(TungLamStepperFault::HomingTravelExceeded);
+    return true;
   }
 
   // While backing away, only the opposite-direction hard limit remains active.
@@ -971,18 +1312,27 @@ bool TungLamStepper::handleHomingBeforeStepFromIsr() {
   return false;
 }
 
+bool TungLamStepper::homingPhaseLimitExceededFromIsr() const {
+  return homingMaxPhaseSteps_ > 0 &&
+         homingPhaseSteps_ >= homingMaxPhaseSteps_;
+}
+
+void TungLamStepper::resetHomingPhaseCounterFromIsr() {
+  homingPhaseSteps_ = 0;
+}
+
 void TungLamStepper::transitionHomingToBackoffFromIsr() {
   homingState_ = TungLamStepperHomingState::Backoff;
   homingReleasedLimit_ = false;
   homingActiveSamples_ = 0;
   homingInactiveSamples_ = 0;
+  resetHomingPhaseCounterFromIsr();
   prepareDirection(-homingDirectionSign_);
   currentIntervalTicks_ = homingSlowIntervalTicks_;
   currentIntervalQ8_ = ticksToQ8(currentIntervalTicks_);
 
   const uint32_t setupTicks =
-      static_cast<uint32_t>(driverConfig_.directionSetupUs) *
-      tlMaxU32(1, TLTimerEngine::timerHz() / 1000000UL);
+      directionSetupTicks_;
   ticksToStep_ = tlMaxU32(currentIntervalTicks_, setupTicks);
 }
 
@@ -990,23 +1340,25 @@ void TungLamStepper::transitionHomingToSlowSeekFromIsr() {
   homingState_ = TungLamStepperHomingState::SeekSlow;
   homingActiveSamples_ = 0;
   homingInactiveSamples_ = 0;
+  resetHomingPhaseCounterFromIsr();
   prepareDirection(homingDirectionSign_);
   currentIntervalTicks_ = homingSlowIntervalTicks_;
   currentIntervalQ8_ = ticksToQ8(currentIntervalTicks_);
 
   const uint32_t setupTicks =
-      static_cast<uint32_t>(driverConfig_.directionSetupUs) *
-      tlMaxU32(1, TLTimerEngine::timerHz() / 1000000UL);
+      directionSetupTicks_;
   ticksToStep_ = tlMaxU32(currentIntervalTicks_, setupTicks);
 }
 
 void TungLamStepper::finishHomingFromIsr() {
   running_ = false;
+  stopping_ = false;
   mode_ = TungLamStepperMode::Idle;
   homingState_ = TungLamStepperHomingState::Complete;
   homed_ = true;
   homingActiveSamples_ = 0;
   homingInactiveSamples_ = 0;
+  homingPhaseSteps_ = 0;
   ticksToStep_ = 0;
   currentPosition_ = homingHomePosition_;
   targetPosition_ = homingHomePosition_;
@@ -1082,6 +1434,7 @@ void TungLamStepper::onStepCompletedFromIsr() {
 
 void TungLamStepper::hardStopFromIsr(TungLamStepperFault fault) {
   running_ = false;
+  stopping_ = false;
   mode_ = TungLamStepperMode::Idle;
   ticksToStep_ = 0;
   fault_ = fault;
@@ -1093,6 +1446,7 @@ void TungLamStepper::hardStopFromIsr(TungLamStepperFault fault) {
 
 void TungLamStepper::finishMoveFromIsr() {
   running_ = false;
+  stopping_ = false;
   mode_ = TungLamStepperMode::Idle;
   ticksToStep_ = 0;
   targetPosition_ = currentPosition_;
@@ -1108,34 +1462,77 @@ void TungLamStepper::recalculateDeceleratedStop() {
   const uint32_t decel =
       tlMaxU32(1, motionConfig_.decelerationStepsPerSecond2);
 
-  uint32_t stopSteps = static_cast<uint32_t>(
-      (static_cast<uint64_t>(speed) * speed + (2UL * decel - 1)) /
-      (2UL * decel));
-  stopSteps = tlMaxU32(1, stopSteps);
+  const uint64_t denominator = 2ULL * decel;
+  const uint64_t requested64 =
+      (static_cast<uint64_t>(speed) * speed + denominator - 1ULL) /
+      denominator;
 
-  if (mode_ == TungLamStepperMode::Continuous) {
-    mode_ = TungLamStepperMode::Position;
-    totalSteps_ = stopSteps;
-    completedSteps_ = 0;
-    accelSteps_ = 0;
-    cruiseSteps_ = 0;
-  } else {
-    totalSteps_ = completedSteps_ + stopSteps;
-    accelSteps_ = completedSteps_;
-    cruiseSteps_ = 0;
+  uint32_t requestedStopSteps =
+      requested64 > static_cast<uint64_t>(INT32_MAX)
+          ? static_cast<uint32_t>(INT32_MAX)
+          : static_cast<uint32_t>(requested64);
+  requestedStopSteps = tlMaxU32(1, requestedStopSteps);
+
+  uint32_t allowedStopSteps = requestedStopSteps;
+
+  if (mode_ == TungLamStepperMode::Position) {
+    const uint32_t remaining =
+        totalSteps_ > completedSteps_ ? totalSteps_ - completedSteps_ : 0;
+    if (remaining == 0) {
+      finishMoveFromIsr();
+      return;
+    }
+    allowedStopSteps = tlMinU32(allowedStopSteps, remaining);
   }
-
-  decelSteps_ = stopSteps;
-  decelN_ = -static_cast<int32_t>(stopSteps);
 
   int64_t target =
       static_cast<int64_t>(currentPosition_) +
-      static_cast<int64_t>(directionSign_) * stopSteps;
+      static_cast<int64_t>(directionSign_) * allowedStopSteps;
 
   if (softLimitsEnabled_) {
-    if (target < softMin_) target = softMin_;
-    if (target > softMax_) target = softMax_;
+    if (directionSign_ > 0) {
+      // Chặn motion đi xa hơn phía +MAX. Nếu đang dưới MIN và đi dương,
+      // vẫn cho phép recovery về vùng hợp lệ.
+      if (currentPosition_ >= softMax_) {
+        allowedStopSteps = 0;
+      } else {
+        const uint32_t toMax = static_cast<uint32_t>(
+            static_cast<int64_t>(softMax_) - currentPosition_);
+        allowedStopSteps = tlMinU32(allowedStopSteps, toMax);
+      }
+    } else {
+      // Chặn motion đi xa hơn phía -MIN. Nếu đang trên MAX và đi âm,
+      // vẫn cho phép recovery về vùng hợp lệ.
+      if (currentPosition_ <= softMin_) {
+        allowedStopSteps = 0;
+      } else {
+        const uint32_t toMin = static_cast<uint32_t>(
+            static_cast<int64_t>(currentPosition_) - softMin_);
+        allowedStopSteps = tlMinU32(allowedStopSteps, toMin);
+      }
+    }
   }
+
+  if (allowedStopSteps == 0) {
+    running_ = false;
+    stopping_ = false;
+    mode_ = TungLamStepperMode::Idle;
+    ticksToStep_ = 0;
+    targetPosition_ = currentPosition_;
+    return;
+  }
+
+  mode_ = TungLamStepperMode::Position;
+  stopping_ = true;
+  totalSteps_ = completedSteps_ + allowedStopSteps;
+  accelSteps_ = completedSteps_;
+  cruiseSteps_ = 0;
+  decelSteps_ = allowedStopSteps;
+  decelN_ = -static_cast<int32_t>(allowedStopSteps);
+
+  target =
+      static_cast<int64_t>(currentPosition_) +
+      static_cast<int64_t>(directionSign_) * allowedStopSteps;
 
   if (target < -2147483648LL) target = -2147483648LL;
   if (target > 2147483647LL) target = 2147483647LL;
@@ -1149,7 +1546,12 @@ bool TungLamStepper::readLimit(
   return limitsActiveLow_ ? !raw : raw;
 }
 
-uint32_t TungLamStepper::absSteps(int32_t delta) {
-  if (delta >= 0) return static_cast<uint32_t>(delta);
-  return static_cast<uint32_t>(-(static_cast<int64_t>(delta)));
+bool TungLamStepper::roundedFloatToInt32(float value, int32_t* out) {
+  if (out == nullptr || !isfinite(value)) return false;
+
+  // Largest positive float that is still safely representable as int32_t.
+  if (value < -2147483648.0f || value > 2147483520.0f) return false;
+
+  *out = static_cast<int32_t>(lroundf(value));
+  return true;
 }

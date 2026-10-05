@@ -15,6 +15,12 @@ TungLamStepper* TLTimerEngine::axes_[TLTimerEngine::kMaxAxes] = {};
 volatile bool TLTimerEngine::claimed_ = false;
 volatile uint16_t TLTimerEngine::scheduledDeltaTicks_ = 0;
 volatile uint16_t TLTimerEngine::scheduledStartCounter_ = 0;
+uint8_t TLTimerEngine::savedTccr1a_ = 0;
+uint8_t TLTimerEngine::savedTccr1b_ = 0;
+uint8_t TLTimerEngine::savedTimsk1_ = 0;
+uint16_t TLTimerEngine::savedTcnt1_ = 0;
+uint16_t TLTimerEngine::savedOcr1a_ = 0;
+uint16_t TLTimerEngine::savedOcr1b_ = 0;
 
 namespace {
 
@@ -78,6 +84,7 @@ void TLTimerEngine::unregisterAxis(TungLamStepper* axis) {
   }
   armNextRiseFromIsr();
   armNextFallFromIsr();
+  releaseTimer1IfUnused();
 }
 
 void TLTimerEngine::synchronizeNow() {
@@ -144,25 +151,68 @@ bool TLTimerEngine::claimTimer1() {
 #if !defined(TCCR1A) || !defined(TCCR1B) || !defined(TIMSK1)
   return false;
 #else
-  // Arduino AVR core configures Timer1 for analogWrite() even when no sketch
-  // actively owns it. Treat enabled Timer1 interrupts as the real ownership
-  // conflict, then deliberately reclaim the timer from the default PWM setup.
   const uint8_t busyInterrupts =
       _BV(OCIE1A) | _BV(OCIE1B) | _BV(TOIE1) | _BV(ICIE1);
   if ((TIMSK1 & busyInterrupts) != 0) return false;
 
+  // Arduino AVR core default for Timer1 is phase-correct 8-bit PWM.
+  uint8_t arduinoDefaultA = _BV(WGM10);
+  uint8_t arduinoDefaultB = _BV(CS11);
+#if F_CPU >= 8000000L
+  arduinoDefaultB |= _BV(CS10);
+#endif
+
+  const bool looksArduinoDefault =
+      TCCR1A == arduinoDefaultA && TCCR1B == arduinoDefaultB;
+  const bool looksUnused = TCCR1A == 0 && TCCR1B == 0;
+
+  // Fail closed if another subsystem changed Timer1 mode/output settings.
+  if (!looksArduinoDefault && !looksUnused) return false;
+
+  savedTccr1a_ = TCCR1A;
+  savedTccr1b_ = TCCR1B;
+  savedTimsk1_ = TIMSK1;
+  savedTcnt1_ = TCNT1;
+  savedOcr1a_ = OCR1A;
+  savedOcr1b_ = OCR1B;
+
   TCCR1A = 0;
   TCCR1B = 0;
+  TIMSK1 = 0;
   TCNT1 = 0;
   OCR1A = 0;
   OCR1B = 0;
 
-  // Normal mode, prescaler /8. At 16 MHz this gives a 2 MHz timer (0.5 us/tick).
+  // Normal mode, prescaler /8. At 16 MHz: 2 MHz timer = 0.5 us/tick.
   TCCR1B = _BV(CS11);
-  TIMSK1 &= static_cast<uint8_t>(~(_BV(OCIE1A) | _BV(OCIE1B)));
 
   claimed_ = true;
   return true;
+#endif
+}
+
+void TLTimerEngine::releaseTimer1IfUnused() {
+#if defined(TCCR1A) && defined(TCCR1B) && defined(TIMSK1)
+  if (!claimed_) return;
+
+  for (uint8_t i = 0; i < kMaxAxes; ++i) {
+    if (axes_[i] != nullptr) return;
+  }
+
+  TIMSK1 = 0;
+  TCCR1A = 0;
+  TCCR1B = 0;
+
+  TCNT1 = savedTcnt1_;
+  OCR1A = savedOcr1a_;
+  OCR1B = savedOcr1b_;
+  TCCR1A = savedTccr1a_;
+  TCCR1B = savedTccr1b_;
+  TIMSK1 = savedTimsk1_;
+
+  scheduledDeltaTicks_ = 0;
+  scheduledStartCounter_ = 0;
+  claimed_ = false;
 #endif
 }
 
