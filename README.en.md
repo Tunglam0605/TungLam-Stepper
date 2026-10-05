@@ -189,6 +189,22 @@ The three-library integration regression is stored under:
 extras/integration-examples/ThreeLibraryRobot/
 ```
 
+Driver-specific reference sketches are intentionally kept outside the Arduino IDE menu:
+
+```text
+extras/driver-examples/
+```
+
+Available references:
+
+- A4988 — STEP/DIR/nEN + software-controlled MS1/MS2/MS3.
+- DRV8825 — STEP/DIR/nEN + MODE0/MODE1/MODE2.
+- TB6600 — DIP/manual microstep with active-HIGH STEP example.
+- DM542 — DIP/manual microstep with active-LOW/sinking example.
+- TMC2209 — STEP/DIR motion only; UART configuration remains external.
+
+See [Driver-specific examples](extras/driver-examples/README.md).
+
 ## Validation status
 
 Software validation includes architecture regression, motion math tests, Mega2560 compile with warnings enabled, and a combined PS2 + Drive + Stepper integration compile.

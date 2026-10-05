@@ -68,6 +68,21 @@ jobs:
             fi
           done
 
+      - name: Compile driver reference examples for Arduino Mega 2560
+        shell: bash
+        run: |
+          set -euo pipefail
+          for sketch in extras/driver-examples/*; do
+            if [ -d "$sketch" ]; then
+              echo "=== Compiling $sketch ==="
+              arduino-cli compile \
+                --fqbn arduino:avr:mega \
+                --warnings all \
+                --library . \
+                "$sketch"
+            fi
+          done
+
   compile-generic-avr:
     runs-on: ubuntu-24.04
     steps:

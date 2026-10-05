@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.2 - Driver examples
+
+### Added
+- Driver-specific reference sketches for A4988, DRV8825, TB6600, DM542 and TMC2209 STEP/DIR mode.
+- A4988 example demonstrates software-controlled MS1/MS2/MS3 and the integrated A4988 microstep profile.
+- DRV8825 example demonstrates MODE0/MODE1/MODE2 and the integrated 1/32 profile.
+- TB6600 example demonstrates DIP/manual microstep with active-HIGH STEP wiring.
+- DM542 example demonstrates DIP/manual microstep with active-LOW/sinking STEP polarity.
+- TMC2209 example demonstrates library use in STEP/DIR mode while keeping UART configuration outside the motion library.
+- `extras/driver-examples/README.md` explains wiring styles, polarity selection and which reference to copy for other STEP/DIR drivers.
+- GitHub Actions now compiles every driver-specific reference sketch on Arduino Mega2560.
+
+### Changed
+- Main Arduino IDE menu still contains only the 3 project templates; driver-specific examples remain under `extras/`.
+- Hardware wiring notes explicitly warn that optocoupled industrial driver input requirements vary by module and must be checked against the exact module datasheet.
+
 ## 0.1.1 - Documentation quality
 
 ### Changed

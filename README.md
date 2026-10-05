@@ -516,6 +516,24 @@ Triết lý:
 
 > **example = skeleton project dùng thật, không phải mỗi API một demo nhỏ.**
 
+## Ví dụ theo từng driver
+
+Để không làm menu Arduino IDE bị rác, các ví dụ phần cứng theo driver nằm trong:
+
+```text
+extras/driver-examples/
+```
+
+Có sẵn:
+
+- **A4988** — STEP/DIR/nEN + MS1/MS2/MS3, profile microstep tích hợp.
+- **DRV8825** — STEP/DIR/nEN + MODE0/1/2, ví dụ 1/32.
+- **TB6600** — DIP/manual microstep, ví dụ STEP active-HIGH.
+- **DM542** — DIP/manual microstep, ví dụ common-anode/sinking active-LOW.
+- **TMC2209 STEP/DIR** — motion STEP/DIR, UART configuration để subsystem khác quản lý.
+
+Xem [Driver-specific examples](extras/driver-examples/README.md) để chọn đúng wiring/polarity.
+
 ---
 
 # Chú thích API trong Arduino IDE

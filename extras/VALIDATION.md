@@ -58,6 +58,8 @@ All commands were compiled with `--warnings all`.
 | Uno | AVRGenericSmoke | 12,024 B / 32,256 B | 243 B / 2,048 B | PASS |
 | Mega2560 | PS2 + Drive + Stepper integration | 25,014 B / 253,952 B | 785 B / 8,192 B | PASS |
 
+Driver-specific reference examples are also compiled for Mega2560 in CI: A4988, DRV8825, TB6600, DM542 and TMC2209 STEP/DIR.
+
 The integration build uses the local matching libraries:
 
 - `TungLam_PS2` 0.5.0 baseline

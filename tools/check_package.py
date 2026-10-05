@@ -33,7 +33,7 @@ for key in [
 check(props.get("name") == "TungLam_Stepper", "library name is stable")
 check(re.fullmatch(r"\d+\.\d+\.\d+", props.get("version", "")) is not None,
       "version is strict semver")
-check(props.get("version") == "0.1.1", "development package version is 0.1.1")
+check(props.get("version") == "0.1.2", "development package version is 0.1.2")
 check(props.get("architectures") == "avr", "architecture scope is avr")
 check(props.get("includes") == "TungLam_Stepper.h",
       "Arduino auto-include header is correct")
@@ -74,6 +74,19 @@ integration = (
 )
 check(integration.is_file(),
       "three-library integration is kept outside Arduino IDE menu")
+
+driver_examples = {
+    "A4988": ROOT / "extras" / "driver-examples" / "A4988" / "A4988.ino",
+    "DRV8825": ROOT / "extras" / "driver-examples" / "DRV8825" / "DRV8825.ino",
+    "TB6600": ROOT / "extras" / "driver-examples" / "TB6600" / "TB6600.ino",
+    "DM542": ROOT / "extras" / "driver-examples" / "DM542" / "DM542.ino",
+    "TMC2209_STEPDIR": ROOT / "extras" / "driver-examples" / "TMC2209_STEPDIR" / "TMC2209_STEPDIR.ino",
+}
+for name, sketch in driver_examples.items():
+    check(sketch.is_file(), f"driver reference exists: {name}")
+
+check((ROOT / "extras" / "driver-examples" / "README.md").is_file(),
+      "driver example guide exists")
 
 smoke = ROOT / "extras" / "compile-tests" / "AVRGenericSmoke" / "AVRGenericSmoke.ino"
 check(smoke.is_file(), "generic AVR compile smoke sketch exists")

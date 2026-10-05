@@ -179,7 +179,7 @@ check("#include <TungLam_PS2.h>" in integration and
       "three-library integration regression exists")
 
 print("\n=== Package / docs ===")
-check("version=0.1.1" in props, "development version is 0.1.1")
+check("version=0.1.2" in props, "development version is 0.1.2")
 check("architectures=avr" in props, "platform scope is explicit: AVR")
 check("hardware validation" in readme.lower() and "v1.0" in readme.lower(),
       "VI README does not claim hardware-stable v1.0")
