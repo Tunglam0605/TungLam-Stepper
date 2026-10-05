@@ -1,0 +1,7 @@
+.vscode/
+.idea/
+build/
+*.hex
+*.elf
+*.eep
+*.map

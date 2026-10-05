@@ -1,0 +1,56 @@
+name: Arduino CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Architecture audit
+        run: python3 tools/check_architecture.py
+
+      - name: Motion math regression
+        run: python3 tests/test_motion_math.py
+
+  arduino-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Arduino Lint
+        uses: arduino/arduino-lint-action@v3
+        with:
+          library-manager: false
+          compliance: strict
+          project-type: library
+
+  compile-mega:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install AVR core
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install arduino:avr@1.8.8
+
+      - name: Compile every example for Arduino Mega 2560
+        shell: bash
+        run: |
+          set -euo pipefail
+          for sketch in examples/*; do
+            if [ -d "$sketch" ]; then
+              echo "=== Compiling $sketch ==="
+              arduino-cli compile                 --fqbn arduino:avr:mega                 --library .                 "$sketch"
+            fi
+          done
