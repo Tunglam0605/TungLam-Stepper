@@ -20,6 +20,9 @@ jobs:
       - name: API surface audit
         run: python3 tools/check_api_surface.py
 
+      - name: API documentation audit
+        run: python3 tools/check_api_docs.py
+
       - name: Package audit
         run: python3 tools/check_package.py
 

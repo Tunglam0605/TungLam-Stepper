@@ -33,7 +33,7 @@ for key in [
 check(props.get("name") == "TungLam_Stepper", "library name is stable")
 check(re.fullmatch(r"\d+\.\d+\.\d+", props.get("version", "")) is not None,
       "version is strict semver")
-check(props.get("version") == "0.1.0", "development package version is 0.1.0")
+check(props.get("version") == "0.1.1", "development package version is 0.1.1")
 check(props.get("architectures") == "avr", "architecture scope is avr")
 check(props.get("includes") == "TungLam_Stepper.h",
       "Arduino auto-include header is correct")

@@ -19,6 +19,7 @@ This file records the software gates used for the current `0.1.0` development ba
 | `python tools/check_architecture.py` | PASS |
 | `python tests/test_motion_math.py` | PASS |
 | `python tools/check_api_surface.py` | PASS |
+| `python tools/check_api_docs.py` | PASS |
 | `python tools/check_package.py` | PASS |
 | `git diff --check` | PASS |
 

@@ -518,6 +518,18 @@ Triết lý:
 
 ---
 
+# Chú thích API trong Arduino IDE
+
+Header public dùng Doxygen tiếng Việt theo cùng chuẩn với hai thư viện TungLam trước:
+
+- mọi public API có `@brief`;
+- API có tham số có `@param`;
+- API trả dữ liệu có `@return`;
+- đơn vị như `pulse/s`, `pulse/s²`, `us`, `độ`, `rev`, travel unit được ghi rõ;
+- enum fault/mode/homing và resource Timer1 được giải thích ngay trong source.
+
+Gate `tools/check_api_docs.py` kiểm tự động toàn bộ public API để tránh thêm hàm mới mà quên comment.
+
 # Validation
 
 Local software gates hiện được thiết kế gồm:

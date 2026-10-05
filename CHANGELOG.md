@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.1 - Documentation quality
+
+### Changed
+- Expanded Vietnamese Doxygen coverage across the public Stepper API.
+- Every public function now requires `@brief`; parameterized APIs require `@param`; non-void APIs require `@return`.
+- Documented fault/mode/homing/direction/microstep enums and their individual values.
+- Added detailed comments for planner state, homing state, cached timing, limits, mechanical model and ISR helpers.
+- Documented the shared Timer1 scheduler and cached-register GPIO layer.
+- Added `tools/check_api_docs.py`, using the same documentation-quality gate as the TungLam Omni/Mecanum library.
+- Added the API documentation audit to GitHub Actions so future APIs cannot be added undocumented.
+
+### Validation
+- `tools/check_api_docs.py`: 80/80 public functions documented and PASS.
+- This release changes documentation/metadata only; Stepper motion behavior is unchanged from v0.1.0.
+
 ## 0.1.0 - Development
 
 ### Added
@@ -55,4 +70,3 @@
 - GitHub Actions workflow includes architecture regression, motion regression, API/package audits, Arduino Lint, Mega compile, Uno smoke compile and pinned three-library integration compile.
 - Exact local compile sizes and hardware-pending gates are recorded in `extras/VALIDATION.md`.
 - Hardware bench validation is still pending before a hardware-stable release.
-- Remote GitHub repository has not been created yet, so hosted CI has not run.
